@@ -5,6 +5,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <driver/i2s.h>
+// #include "WifiPantalla.h"
 
 // 1. PON AQUÍ EL INCLUDE QUE TE GENERÓ EDGE IMPULSE
 #include <Viernes_inferencing.h>
@@ -16,19 +17,33 @@
 #define I2S_PORT I2S_NUM_0
 
 // Duración de grabación después de detectar el Wake Word (5 segundos)
-#define RECORD_SECONDS   5
+#define RECORD_SECONDS   3
 #define WAV_HEADER_SIZE  44
 #define AUDIO_GAIN       8   // Ganancia por software para el INMP441
 
 // URL por defecto de tu servidor PHP (puedes cambiarla o pasar otra por parámetro)
-static const char* DEFAULT_SERVER_URL = "http://ip_computadora/carpeta_proyecto/upload.php";
+static const char* DEFAULT_SERVER_URL = "http://192.168.250.72/proyecto_viernes/servidor_php/upload.php";
 
-// Buffers en memoria
+// ================== TIPOS Y ESTRUCTURAS DESACOPLADAS ==================
+
+// Tipo de callback para reportar el progreso de grabación sin acoplar la pantalla a este archivo
+typedef void (*CallbackProgresoGrabacion)(int porcentaje, float segundosTranscurridos, int segundosTotales);
+
+struct RespuestaTranscripcion {
+    bool   exito;       // true si status == "success"
+    int    codigoHttp;  // Código HTTP devuelto por el servidor
+    String status;      // "success" o "error"
+    String text;        // Texto transcrito del audio (ej. "hola viernes")
+    String error;       // Descripción del error en caso de fallo
+    String rawJson;     // JSON crudo recibido (para depuración si se requiere)
+};
+
+// Buffers internos del módulo de audio
 static int16_t *audio_buffer = nullptr;
 static uint8_t *wavBuffer    = nullptr;
 static size_t   wavDataSize  = 0;
 
-// ================== FUNCIONES INTERNAS ==================
+// ================== FUNCIONES INTERNAS (PRIVADAS AL MÓDULO) ==================
 
 // Callback interno que pide Edge Impulse
 static int obtener_datos_audio(size_t offset, size_t length, float *out_ptr) {
@@ -38,10 +53,10 @@ static int obtener_datos_audio(size_t offset, size_t length, float *out_ptr) {
 
 // Genera los 44 bytes de cabecera estándar RIFF/WAV (PCM 16-bit Mono)
 static void crearCabeceraWAV(uint8_t* header, uint32_t dataSize, uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample) {
-    uint32_t fileSize   = dataSize + 36;
-    uint32_t byteRate   = sampleRate * channels * (bitsPerSample / 8);
-    uint16_t blockAlign = channels * (bitsPerSample / 8);
-    uint32_t fmtSize    = 16;
+    uint32_t fileSize    = dataSize + 36;
+    uint32_t byteRate    = sampleRate * channels * (bitsPerSample / 8);
+    uint16_t blockAlign  = channels * (bitsPerSample / 8);
+    uint32_t fmtSize     = 16;
     uint16_t audioFormat = 1; // 1 = PCM
 
     memcpy(header,      "RIFF", 4);
@@ -59,22 +74,80 @@ static void crearCabeceraWAV(uint8_t* header, uint32_t dataSize, uint32_t sample
     memcpy(header + 40, &dataSize, 4);
 }
 
-// ================== FUNCIONES PÚBLICAS ==================
+// Extrae el valor de una clave string en un JSON simple sin requerir librerías externas
+static String extraerCampoJson(const String& json, const char* clave) {
+    String patron = "\"" + String(clave) + "\"";
+    int posClave = json.indexOf(patron);
+    if (posClave == -1) return "";
 
-// Función 1: Llamar una sola vez en tu setup()
+    int posDosPuntos = json.indexOf(':', posClave + patron.length());
+    if (posDosPuntos == -1) return "";
+
+    int posComillaInicio = json.indexOf('"', posDosPuntos + 1);
+    if (posComillaInicio == -1) return "";
+
+    String resultado = "";
+    bool escapado = false;
+
+    for (unsigned int i = posComillaInicio + 1; i < json.length(); i++) {
+        char c = json[i];
+        if (escapado) {
+            if (c == 'n') resultado += '\n';
+            else if (c == 'r') resultado += '\r';
+            else if (c == 't') resultado += '\t';
+            else resultado += c;
+            escapado = false;
+        } else if (c == '\\') {
+            escapado = true;
+        } else if (c == '"') {
+            break; // Fin del valor string
+        } else {
+            resultado += c;
+        }
+    }
+    return resultado;
+}
+
+// Convierte el cuerpo HTTP recibido en una estructura RespuestaTranscripcion limpia
+static RespuestaTranscripcion parsearRespuestaServidor(int httpCode, const String& body) {
+    RespuestaTranscripcion resp;
+    resp.codigoHttp = httpCode;
+    resp.rawJson    = body;
+    resp.status     = extraerCampoJson(body, "status");
+    resp.text       = extraerCampoJson(body, "text");
+    resp.error      = extraerCampoJson(body, "error");
+
+    if (resp.status == "success") {
+        resp.exito = true;
+    } else {
+        resp.exito = false;
+        if (resp.status.length() == 0) {
+            resp.status = "error";
+        }
+        if (resp.error.length() == 0) {
+            if (httpCode <= 0) {
+                resp.error = "Fallo de conexion HTTP (codigo " + String(httpCode) + ")";
+            } else {
+                resp.error = "Respuesta invalida del servidor (HTTP " + String(httpCode) + "): " + body;
+            }
+        }
+    }
+    return resp;
+}
+
+// ================== FUNCIONES PÚBLICAS DESACOPLADAS ==================
+
+// 1. Inicializa I2S y reserva los buffers en memoria (llamar una vez en setup)
 bool iniciarDetectorVoz() {
-    // 1. Reservar buffer para inferencia de Edge Impulse
     audio_buffer = (int16_t *)malloc(EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t));
     if (!audio_buffer) {
         Serial.println("Error: No se pudo reservar memoria para audio_buffer");
         return false;
     }
 
-    // 2. Reservar buffer en PSRAM para grabar los 5 segundos en formato WAV (16-bit)
     wavDataSize = EI_CLASSIFIER_FREQUENCY * RECORD_SECONDS * sizeof(int16_t);
     wavBuffer = (uint8_t *)ps_malloc(WAV_HEADER_SIZE + wavDataSize);
     if (!wavBuffer) {
-        // Fallback a RAM normal si PSRAM no está habilitada (aunque para 5s se recomienda PSRAM)
         wavBuffer = (uint8_t *)malloc(WAV_HEADER_SIZE + wavDataSize);
     }
     if (!wavBuffer) {
@@ -82,7 +155,6 @@ bool iniciarDetectorVoz() {
         return false;
     }
 
-    // 3. Configurar el driver I2S (unificado para Wake Word y grabación WAV)
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = EI_CLASSIFIER_FREQUENCY,
@@ -108,14 +180,13 @@ bool iniciarDetectorVoz() {
     return true;
 }
 
-// Función 2: Llamar en tu loop(). Devuelve true si detecta tu palabra clave
+// 2. Escucha un fragmento y evalúa si se pronunció el Wake Word
 bool escucharWakeWord(const char* palabra_objetivo, float umbral = 0.80f) {
     size_t bytes_leidos = 0;
     size_t bytes_totales = EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t);
 
     i2s_read(I2S_PORT, (void *)audio_buffer, bytes_totales, &bytes_leidos, portMAX_DELAY);
 
-    // Ganancia por software para el INMP441
     for (uint32_t i = 0; i < EI_CLASSIFIER_RAW_SAMPLE_COUNT; i++) {
         int32_t muestra = (int32_t)audio_buffer[i] * AUDIO_GAIN;
         if (muestra > 32767) muestra = 32767;
@@ -135,29 +206,87 @@ bool escucharWakeWord(const char* palabra_objetivo, float umbral = 0.80f) {
     for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
         if (strcmp(result.classification[ix].label, palabra_objetivo) == 0) {
             if (result.classification[ix].value >= umbral) {
-                return true; // ¡Superó el umbral!
+                return true;
             }
         }
     }
     return false;
 }
 
-// Función 3: Envía el contenido de wavBuffer al servidor PHP mediante HTTP POST multipart
-bool enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
+// 3. Captura 5s de audio desde I2S y notifica el avance mediante callback opcional
+bool capturarAudioWAV(CallbackProgresoGrabacion onProgreso = nullptr) {
+    if (!wavBuffer) return false;
+
+    crearCabeceraWAV(wavBuffer, wavDataSize, EI_CLASSIFIER_FREQUENCY, 1, 16);
+    i2s_zero_dma_buffer(I2S_PORT);
+
+    // Notificar inicio (0%) para que la interfaz prepare la barra si hay callback conectado
+    if (onProgreso != nullptr) {
+        onProgreso(0, 0.0f, RECORD_SECONDS);
+    }
+
+    size_t bytesLeidos = 0;
+    size_t totalLeidos = 0;
+    int ultimoPorcentaje = 0;
+    int16_t* pcmDest = (int16_t*)(wavBuffer + WAV_HEADER_SIZE);
+
+    while (totalLeidos < wavDataSize) {
+        size_t bytesPorLeer = wavDataSize - totalLeidos;
+        if (bytesPorLeer > 1024) {
+            bytesPorLeer = 1024;
+        }
+
+        i2s_read(I2S_PORT, (void*)((uint8_t*)pcmDest + totalLeidos), bytesPorLeer, &bytesLeidos, portMAX_DELAY);
+
+        if (bytesLeidos > 0) {
+            size_t indiceInicio   = totalLeidos / sizeof(int16_t);
+            size_t muestrasLeidas = bytesLeidos / sizeof(int16_t);
+
+            for (size_t i = 0; i < muestrasLeidas; i++) {
+                int32_t muestra = (int32_t)pcmDest[indiceInicio + i] * AUDIO_GAIN;
+                if (muestra > 32767) muestra = 32767;
+                if (muestra < -32768) muestra = -32768;
+                pcmDest[indiceInicio + i] = (int16_t)muestra;
+            }
+
+            totalLeidos += bytesLeidos;
+
+            // Actualizar callback cada incremento de 2% para no bloquear la lectura DMA del micrófono
+            if (onProgreso != nullptr) {
+                int porcentajeActual = (int)((totalLeidos * 100) / wavDataSize);
+                if (porcentajeActual >= ultimoPorcentaje + 2 || porcentajeActual == 100) {
+                    ultimoPorcentaje = porcentajeActual;
+                    float segundos = ((float)totalLeidos / (float)wavDataSize) * RECORD_SECONDS;
+                    onProgreso(porcentajeActual, segundos, RECORD_SECONDS);
+                }
+            }
+        }
+    }
+
+    i2s_zero_dma_buffer(I2S_PORT);
+    return true;
+}
+
+// 4. Envía el buffer WAV al servidor PHP y devuelve la estructura RespuestaTranscripcion
+RespuestaTranscripcion enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
+
+    imprimirTextoPantalla("Procesando solicitud...");
+    RespuestaTranscripcion fallo;
+    fallo.exito      = false;
+    fallo.codigoHttp = -1;
+    fallo.status     = "error";
+    fallo.text       = "";
+
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Error: WiFi desconectado, no se puede enviar el audio.");
-        return false;
+        fallo.error = "WiFi desconectado, no se puede enviar el audio.";
+        return fallo;
     }
 
     WiFiClient client;
-    // Si tu servidor usa HTTPS, descomenta las siguientes 2 líneas y comenta WiFiClient client:
-    // WiFiClientSecure client;
-    // client.setInsecure();
-
     HTTPClient http;
     if (!http.begin(client, serverUrl)) {
-        Serial.println("Error: No se pudo iniciar la conexion HTTP");
-        return false;
+        fallo.error = "No se pudo iniciar la conexion HTTP hacia el servidor.";
+        return fallo;
     }
 
     const String boundary = "----ESP32Boundary7d8f3a2b1c";
@@ -177,9 +306,9 @@ bool enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
         payload = (uint8_t*)malloc(totalSize);
     }
     if (!payload) {
-        Serial.println("Error: Sin memoria PSRAM/RAM para armar el payload HTTP");
         http.end();
-        return false;
+        fallo.error = "Sin memoria PSRAM/RAM para armar el payload HTTP.";
+        return fallo;
     }
 
     size_t offset = 0;
@@ -189,74 +318,28 @@ bool enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
     offset += WAV_HEADER_SIZE + wavDataSize;
     memcpy(payload + offset, tail.c_str(), tail.length());
 
-    Serial.printf("Enviando %u bytes a %s...\n", (unsigned int)totalSize, serverUrl);
     int httpResponseCode = http.POST(payload, totalSize);
-
-    Serial.printf("Codigo HTTP: %d\n", httpResponseCode);
-    if (httpResponseCode > 0) {
-        String response = http.getString();
-        Serial.println("--- Respuesta del servidor ---");
-        Serial.println(response);
-        Serial.println("------------------------------");
-    } else {
-        Serial.printf("Fallo en HTTP POST: %s\n", http.errorToString(httpResponseCode).c_str());
-    }
+    String responseBody  = (httpResponseCode > 0) ? http.getString() : http.errorToString(httpResponseCode);
 
     http.end();
     free(payload);
 
-    return (httpResponseCode > 0 && httpResponseCode < 400);
+    return parsearRespuestaServidor(httpResponseCode, responseBody);
 }
 
-// Función 4: Graba 5 segundos de audio desde el INMP441 y lo sube al servidor PHP
-bool grabarYEnviar(const char* serverUrl = DEFAULT_SERVER_URL) {
-    if (!wavBuffer) {
-        Serial.println("Error: wavBuffer no inicializado. ¿Llamaste a iniciarDetectorVoz() en setup()?");
-        return false;
+// 5. Orquesta la grabación de 5s (con callback opcional de barra de progreso) y el envío al servidor
+RespuestaTranscripcion grabarYEnviar(CallbackProgresoGrabacion onProgreso = nullptr, const char* serverUrl = DEFAULT_SERVER_URL) {
+    if (!capturarAudioWAV(onProgreso)) {
+        RespuestaTranscripcion err;
+        err.exito      = false;
+        err.codigoHttp = -1;
+        err.status     = "error";
+        err.text       = "";
+        err.error      = "Buffer WAV no inicializado. Llama a iniciarDetectorVoz() en setup().";
+        return err;
     }
-
-    Serial.printf("Grabando %d segundos de audio...\n", RECORD_SECONDS);
-
-    // 1. Escribir cabecera WAV al inicio del buffer
-    crearCabeceraWAV(wavBuffer, wavDataSize, EI_CLASSIFIER_FREQUENCY, 1, 16);
-
-    // 2. Limpiar el buffer DMA para descartar audio viejo previo a la grabación
-    i2s_zero_dma_buffer(I2S_PORT);
-
-    // 3. Capturar muestras desde el mismo puerto I2S configurado
-    size_t bytesLeidos = 0;
-    size_t totalLeidos = 0;
-    int16_t* pcmDest = (int16_t*)(wavBuffer + WAV_HEADER_SIZE);
-
-    while (totalLeidos < wavDataSize) {
-        size_t bytesPorLeer = wavDataSize - totalLeidos;
-        if (bytesPorLeer > 1024) {
-            bytesPorLeer = 1024; // Leer en bloques de 512 muestras (1024 bytes)
-        }
-
-        i2s_read(I2S_PORT, (void*)((uint8_t*)pcmDest + totalLeidos), bytesPorLeer, &bytesLeidos, portMAX_DELAY);
-
-        if (bytesLeidos > 0) {
-            // Aplicar ganancia por software a las muestras recién leídas
-            size_t indiceInicio = totalLeidos / sizeof(int16_t);
-            size_t muestrasLeidas = bytesLeidos / sizeof(int16_t);
-
-            for (size_t i = 0; i < muestrasLeidas; i++) {
-                int32_t muestra = (int32_t)pcmDest[indiceInicio + i] * AUDIO_GAIN;
-                if (muestra > 32767) muestra = 32767;
-                if (muestra < -32768) muestra = -32768;
-                pcmDest[indiceInicio + i] = (int16_t)muestra;
-            }
-
-            totalLeidos += bytesLeidos;
-        }
-    }
-
-    // Limpiar el DMA después de grabar para que el Wake Word retome audio fresco
-    i2s_zero_dma_buffer(I2S_PORT);
-
-    Serial.println("Grabacion de 5s completada. Subiendo al servidor...");
     return enviarWAV(serverUrl);
 }
+
 
 #endif

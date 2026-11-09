@@ -1,6 +1,7 @@
 #include <TFT_eSPI.h> // Librería para la pantalla integrada de la LilyGO T-Display-S3
 #include <Wire.h>
 #include <WiFi.h>
+#include <Preferences.h>
 
 // =================================================
 // PINES LILYGO T-DISPLAY-S3 TOUCH
@@ -17,6 +18,8 @@
 
 TFT_eSPI tft = TFT_eSPI();
 
+Preferences preferencias;
+
 // =================================================
 // COLORES
 // =================================================
@@ -27,8 +30,20 @@ TFT_eSPI tft = TFT_eSPI();
 #define AZUL        TFT_BLUE
 #define GRIS        0x7BEF
 #define GRIS_OSCURO 0x3186
+#define GRIS_SUTIL  0x52AA  // Gris tenue para el aviso de "toca para continuar"
 #define AMARILLO    TFT_YELLOW
 #define CIAN        TFT_CYAN
+
+// Rosa pastel en formato RGB565 (R:255, G:174, B:201) y variantes para efectos visuales
+#define ROSA_PASTEL           0xFD79
+#define ROSA_PASTEL_BRILLO    0xFE9C  // Tono más claro para reflejos 3D
+#define ROSA_PASTEL_HALO      0x798E  // Tono tenue para el resplandor exterior del LED
+
+// Constantes configurables para las funciones de experiencia de usuario
+#define COLOR_ACENTO_UI       ROSA_PASTEL
+#define COLOR_LED_ENCENDIDO   ROSA_PASTEL
+#define COLOR_LED_APAGADO     GRIS_OSCURO
+#define COLOR_BARRA_PROGRESO  ROSA_PASTEL
 
 // =================================================
 // CREDENCIALES PREDEFINIDAS
@@ -187,6 +202,227 @@ void dibujarCaraNormal() {
 void textoCentrado(const String &texto, int y) {
   tft.setTextDatum(TC_DATUM);
   tft.drawString(texto, tft.width() / 2, y);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// =================================================
+// FUNCIONES DE EXPERIENCIA DE USUARIO (UX)
+// =================================================
+
+/**
+ * FUNCIÓN 4: Espera el toque del usuario mostrando un aviso sutil en la parte inferior.
+ * Al finalizar el toque, restaura la cara principal del asistente.
+ */
+void esperarToqueParaContinuar() {
+  int tx, ty;
+
+  // Dibujar aviso sutil en el borde inferior sin opacar el contenido central
+  tft.setTextSize(1);
+  tft.setTextDatum(BC_DATUM);
+  tft.setTextColor(GRIS_SUTIL, FONDO);
+  tft.drawString("Toca la pantalla para continuar", 160, 166, 1);
+  tft.setTextDatum(TL_DATUM);
+
+  // 1. Si el dedo ya estaba presionando la pantalla antes de entrar, esperar a que la suelte
+  while (leerToquePantalla(tx, ty)) {
+    delay(20);
+  }
+  delay(80);
+
+  // 2. Esperar en bucle hasta que el usuario toque la pantalla
+  while (!leerToquePantalla(tx, ty)) {
+    delay(20);
+  }
+
+  // 3. Esperar a que retire el dedo para no disparar toques fantasma en la cara principal
+  while (leerToquePantalla(tx, ty)) {
+    delay(20);
+  }
+  delay(120);
+
+  // Regresar a la cara normal
+  dibujarCaraNormal();
+}
+
+/**
+ * FUNCIÓN 1: Imprime texto en toda la pantalla con salto de línea automático (word-wrap)
+ * y espera a que el usuario toque la pantalla para continuar.
+ */
+void imprimirTextoPantalla(String texto, bool esperar = false) {
+  tft.fillScreen(FONDO);
+
+  // Marco sutil superior e inferior con el color de acento (ROSA_PASTEL)
+  tft.drawRoundRect(6, 6, 308, 144, 10, COLOR_ACENTO_UI);
+  tft.fillRoundRect(130, 4, 60, 4, 2, COLOR_ACENTO_UI);
+
+  texto.trim();
+  if (texto.length() == 0) {
+    texto = "(Sin texto reconocido)";
+  }
+
+  // Elegir escala de texto según longitud para aprovechar toda la pantalla sin desbordar
+  int textSize = (texto.length() <= 75) ? 2 : 1;
+  int fontNum  = 2; // Fuente 2 de TFT_eSPI (16px de base)
+  int lineHeight = (textSize == 2) ? 30 : 18;
+  int maxAnchoPx = 284; // Margen interno seguro dentro del recuadro (320 - 36)
+  int maxLineas  = (textSize == 2) ? 4 : 6;
+
+  tft.setTextSize(textSize);
+
+  // Separar el texto en líneas con word-wrap respetando el ancho en píxeles
+  String lineas[8];
+  int numLineas = 0;
+  String lineaActual = "";
+  int idx = 0;
+  int len = texto.length();
+
+  while (idx < len && numLineas < maxLineas) {
+    // Saltar espacios iniciales
+    while (idx < len && texto[idx] == ' ') idx++;
+    if (idx >= len) break;
+
+    // Extraer siguiente palabra
+    int sigEspacio = texto.indexOf(' ', idx);
+    if (sigEspacio == -1) sigEspacio = len;
+    String palabra = texto.substring(idx, sigEspacio);
+    idx = sigEspacio + 1;
+
+    String candidata = (lineaActual.length() == 0) ? palabra : (lineaActual + " " + palabra);
+
+    if (tft.textWidth(candidata, fontNum) <= maxAnchoPx) {
+      lineaActual = candidata;
+    } else {
+      if (lineaActual.length() > 0) {
+        lineas[numLineas++] = lineaActual;
+        lineaActual = palabra;
+      } else {
+        // Si una sola palabra es más ancha que la pantalla, la cortamos
+        lineas[numLineas++] = palabra;
+        lineaActual = "";
+      }
+    }
+  }
+  if (lineaActual.length() > 0 && numLineas < maxLineas) {
+    lineas[numLineas++] = lineaActual;
+  }
+
+  // Centrar el bloque de texto verticalmente dentro del área principal (y: 12 a 144)
+  int altoTotalBloque = numLineas * lineHeight;
+  int inicioY = 78 - (altoTotalBloque / 2) + (lineHeight / 2);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(BLANCO, FONDO);
+
+  for (int i = 0; i < numLineas; i++) {
+    int yLinea = inicioY + (i * lineHeight);
+    tft.drawString(lineas[i], 160, yLinea, fontNum);
+  }
+
+  tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM);
+
+  // Esperar toque del usuario en la parte inferior
+  if (esperar) esperarToqueParaContinuar();
+}
+
+/**
+ * FUNCIÓN 2: Dibuja y anima un LED virtual en pantalla completa según `estado` (true/false)
+ * y espera el toque del usuario para continuar.
+ */
+void mostrarLedVirtual(bool estado) {
+  tft.fillScreen(FONDO);
+
+  int color_led;
+  String estado_led;
+
+  if (estado) {
+    color_led = ROSA_PASTEL;
+    estado_led = "LED ENCENDIDO";
+  } else {
+    // Cuerpo del LED apagado
+    color_led = GRIS_OSCURO;
+    estado_led = "LED APAGADO";
+  }
+
+  tft.fillCircle(160, 60, 30, color_led);          // 
+  tft.fillRect(130, 60, 60, 30, color_led);        // Cuerpecito del LED
+  tft.fillCircle(150, 50, 8, TFT_WHITE);          // Brillo/reflejo en el cristal
+  tft.fillRoundRect(125, 90, 70, 10, 3, GRIS_OSCURO); // Base
+  tft.fillRect(140, 100, 6, 30, TFT_SILVER);      // Patita (Cátodo)
+  tft.fillRect(174, 100, 6, 30, TFT_SILVER);      // Patita (Ánodo)
+  
+  tft.setTextColor(BLANCO, FONDO);
+  tft.setTextSize(2);
+  textoCentrado(estado_led, 140);
+
+  tft.setTextDatum(TL_DATUM);
+}
+
+/**
+ * FUNCIÓN 3: Muestra y actualiza la barra de progreso de los 5 segundos de grabación.
+ * Diseñada para pasarse como callback desacoplado a DetectorVoz.h.
+ */
+void mostrarBarraProgresoGrabacion(int porcentaje, float segundosTranscurridos, int segundosTotales) {
+  if (porcentaje < 0) porcentaje = 0;
+  if (porcentaje > 100) porcentaje = 100;
+
+  // Coordenadas de la barra
+  const int barX = 28;
+  const int barY = 92;
+  const int barW = 264;
+  const int barH = 26;
+
+  // Si es el inicio (0%), dibujamos la estructura base de la pantalla una sola vez
+  if (porcentaje == 0) {
+    tft.fillScreen(FONDO);
+    tft.setTextSize(1);
+
+    // Marco exterior decorativo
+    tft.drawRoundRect(6, 6, 308, 158, 10, GRIS_OSCURO);
+
+    // Indicador superior de grabación activa
+    tft.fillCircle(58, 32, 7, COLOR_BARRA_PROGRESO);
+    tft.drawCircle(58, 32, 11, ROSA_PASTEL_HALO);
+
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(COLOR_BARRA_PROGRESO, FONDO);
+    tft.drawString("ESCUCHANDO", 172, 32, 4);
+
+    // Subtítulo de instrucción
+    tft.setTextColor(BLANCO, FONDO);
+    tft.drawString("Habla ahora...", 160, 66, 2);
+
+    // Contenedor exterior de la barra de progreso
+    tft.drawRoundRect(barX, barY, barW, barH, 8, BLANCO);
+    tft.drawRoundRect(barX + 1, barY + 1, barW - 2, barH - 2, 7, GRIS_OSCURO);
+  }
+
+  // Efecto de pulso en el indicador superior mientras avanza la grabación
+  uint16_t colorPulso = ((porcentaje / 10) % 2 == 0) ? COLOR_BARRA_PROGRESO : ROSA_PASTEL_HALO;
+  tft.fillCircle(58, 32, 7, colorPulso);
+
+  // Relleno interno de la barra en ROSA_PASTEL (ancho máximo interno = barW - 8 = 256 px)
+  int maxAnchoInterno = barW - 8;
+  int anchoRelleno = (porcentaje * maxAnchoInterno) / 100;
+
+  if (anchoRelleno > 0) {
+    tft.fillRoundRect(barX + 4, barY + 4, anchoRelleno, barH - 8, 5, COLOR_BARRA_PROGRESO);
+    // Línea de brillo superior para darle acabado estilizado a la barra
+    if (anchoRelleno > 8) {
+      tft.drawFastHLine(barX + 8, barY + 6, anchoRelleno - 8, ROSA_PASTEL_BRILLO);
+    }
+  }
+
+  // Texto inferior con segundos transcurridos y porcentaje
+  char info[44];
+  snprintf(info, sizeof(info), "%.1f s / %d.0 s   (%d%%)", segundosTranscurridos, segundosTotales, porcentaje);
+
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(GRIS, FONDO);
+  tft.setTextPadding(240);
+  tft.drawString(info, 160, 140, 2);
+  tft.setTextPadding(0);
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -536,6 +772,12 @@ void gestionarConexion() {
       
       Serial.println("\n>>> ¡CONEXION EXITOSA! <<<");
       Serial.print("IP asignada: "); Serial.println(WiFi.localIP());
+
+      preferencias.begin("wifi_data", false); // false = modo lectura/escritura
+      preferencias.putString("ssid", ssidSeleccionado);
+      preferencias.putString("pass", passwordIngresada);
+      preferencias.end();
+      Serial.println("Credenciales guardadas correctamente.");
     } 
     else if (millis() - tiempoInicioConexion > 15000) {
       colorWiFi = ROJO;
@@ -554,19 +796,14 @@ void gestionarConexion() {
 // =================================================
 
 void configurarPantallaYRed() {
-  delay(500);
-  Serial.begin(115200);
 
-  // Encender energía de la pantalla en la LilyGO T-Display-S3
   pinMode(LCD_PWR, OUTPUT);
   digitalWrite(LCD_PWR, HIGH);
 
-  // Iniciar pantalla TFT_eSPI
   tft.init();
   tft.setRotation(1); // Horizontal (320x170)
   tft.fillScreen(FONDO);
 
-  // Luz de fondo
   pinMode(LCD_BL, OUTPUT);
   analogWrite(LCD_BL, 200);
 
@@ -576,8 +813,19 @@ void configurarPantallaYRed() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-  colorWiFi = GRIS;
-  dibujarCaraNormal();
-  
-  Serial.println("Viernes Touch encendida. Toca el icono Wi-Fi en la esquina superior derecha.");
+  preferencias.begin("wifi_data", true); // true = modo solo lectura
+  String ssidGuardado = preferencias.getString("ssid", "");
+  String passGuardado = preferencias.getString("pass", "");
+  preferencias.end();
+
+  if (ssidGuardado.length() > 0) {
+    ssidSeleccionado = ssidGuardado;
+    passwordIngresada = passGuardado;
+    Serial.println("Autoconectando a: " + ssidGuardado);
+    iniciarConexion(ssidGuardado, passGuardado);
+  } else {
+    colorWiFi = GRIS;
+    dibujarCaraNormal();
+    Serial.println("Viernes Touch encendida. Toca el icono Wi-Fi en la esquina superior derecha.");
+  }
 }
