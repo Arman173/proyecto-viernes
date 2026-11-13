@@ -5,26 +5,23 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <driver/i2s.h>
-// #include "WifiPantalla.h"
+#include "Credenciales.h"
 
-// 1. PON AQUÍ EL INCLUDE QUE TE GENERÓ EDGE IMPULSE
+// Biblioteca de viernes de edge pulse
 #include <Viernes_inferencing.h>
 
-// ================== CONFIGURACIÓN I2S Y GRABACIÓN ==================
+// CONFIGURACIÓN I2S Y GRABACIÓN
 #define I2S_WS   2
 #define I2S_SCK  1
 #define I2S_SD   3
 #define I2S_PORT I2S_NUM_0
 
-// Duración de grabación después de detectar el Wake Word (5 segundos)
+// Duración de grabación después de detectar el Wake Word
 #define RECORD_SECONDS   3
 #define WAV_HEADER_SIZE  44
 #define AUDIO_GAIN       8   // Ganancia por software para el INMP441
 
-// URL por defecto de tu servidor PHP (puedes cambiarla o pasar otra por parámetro)
-static const char* DEFAULT_SERVER_URL = "http://192.168.250.72/proyecto_viernes/servidor_php/upload.php";
-
-// ================== TIPOS Y ESTRUCTURAS DESACOPLADAS ==================
+// TIPOS Y ESTRUCTURAS DESACOPLADAS
 
 // Tipo de callback para reportar el progreso de grabación sin acoplar la pantalla a este archivo
 typedef void (*CallbackProgresoGrabacion)(int porcentaje, float segundosTranscurridos, int segundosTotales);
@@ -43,7 +40,7 @@ static int16_t *audio_buffer = nullptr;
 static uint8_t *wavBuffer    = nullptr;
 static size_t   wavDataSize  = 0;
 
-// ================== FUNCIONES INTERNAS (PRIVADAS AL MÓDULO) ==================
+// FUNCIONES INTERNAS (PRIVADAS AL MÓDULO)
 
 // Callback interno que pide Edge Impulse
 static int obtener_datos_audio(size_t offset, size_t length, float *out_ptr) {
@@ -135,9 +132,9 @@ static RespuestaTranscripcion parsearRespuestaServidor(int httpCode, const Strin
     return resp;
 }
 
-// ================== FUNCIONES PÚBLICAS DESACOPLADAS ==================
+// FUNCIONES PÚBLICAS DESACOPLADAS
 
-// 1. Inicializa I2S y reserva los buffers en memoria (llamar una vez en setup)
+// Inicializa I2S y reserva los buffers en memoria
 bool iniciarDetectorVoz() {
     audio_buffer = (int16_t *)malloc(EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t));
     if (!audio_buffer) {
@@ -180,7 +177,7 @@ bool iniciarDetectorVoz() {
     return true;
 }
 
-// 2. Escucha un fragmento y evalúa si se pronunció el Wake Word
+// Escucha un fragmento y evalúa si se pronunció el Wake Word
 bool escucharWakeWord(const char* palabra_objetivo, float umbral = 0.80f) {
     size_t bytes_leidos = 0;
     size_t bytes_totales = EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t);
@@ -213,7 +210,7 @@ bool escucharWakeWord(const char* palabra_objetivo, float umbral = 0.80f) {
     return false;
 }
 
-// 3. Captura 5s de audio desde I2S y notifica el avance mediante callback opcional
+// Captura los segundos de RECORD_SECONDS de audio desde I2S y notifica el avance mediante callback opcional
 bool capturarAudioWAV(CallbackProgresoGrabacion onProgreso = nullptr) {
     if (!wavBuffer) return false;
 
@@ -267,8 +264,8 @@ bool capturarAudioWAV(CallbackProgresoGrabacion onProgreso = nullptr) {
     return true;
 }
 
-// 4. Envía el buffer WAV al servidor PHP y devuelve la estructura RespuestaTranscripcion
-RespuestaTranscripcion enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
+// Envía el buffer WAV al servidor PHP y devuelve la estructura RespuestaTranscripcion
+RespuestaTranscripcion enviarWAV(const char* serverUrl) {
 
     imprimirTextoPantalla("Procesando solicitud...");
     RespuestaTranscripcion fallo;
@@ -327,7 +324,7 @@ RespuestaTranscripcion enviarWAV(const char* serverUrl = DEFAULT_SERVER_URL) {
     return parsearRespuestaServidor(httpResponseCode, responseBody);
 }
 
-// 5. Orquesta la grabación de 5s (con callback opcional de barra de progreso) y el envío al servidor
+// Orquesta la grabación de los x segundos (con callback opcional de barra de progreso) y el envío al servidor
 RespuestaTranscripcion grabarYEnviar(CallbackProgresoGrabacion onProgreso = nullptr, const char* serverUrl = DEFAULT_SERVER_URL) {
     if (!capturarAudioWAV(onProgreso)) {
         RespuestaTranscripcion err;
@@ -340,6 +337,5 @@ RespuestaTranscripcion grabarYEnviar(CallbackProgresoGrabacion onProgreso = null
     }
     return enviarWAV(serverUrl);
 }
-
 
 #endif

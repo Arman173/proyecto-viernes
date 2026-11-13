@@ -1,3 +1,4 @@
+#include "Credenciales.h"
 #include "WifiPantalla.h"
 #include "DetectorVoz.h"
 
@@ -10,68 +11,51 @@ void ejecutarComandosViernes(String texto) {
   texto.toLowerCase(); // esto es para convertir a minusculas y sea mas fácil
   tft.fillScreen(FONDO); /*limpiar pantalla*/
 
-  // Primer comando
-  // Prender LED
-  /*if (texto.indexOf("prende") >= 0 && texto.indexOf("led") >= 0) {
-    tft.fillCircle(160, 85, 40, TFT_BLUE); // Cambia a TFT_MAGENTA para rosa
-    textoCentrado("LED Encendido", 140);
-  }*/
-
+  // Primer comando - Prender LED
   if (texto.indexOf("prende") >= 0 && texto.indexOf("led") >= 0) {
     // Dibujo del LED encendido
     mostrarLedVirtual(true);
 
     delay(3000);
   }
-  // 2. Comando: Apagar LED
-  /*else if (texto.indexOf("apaga") >= 0 && texto.indexOf("led") >= 0) {
-    tft.fillCircle(160, 85, 40, GRIS_OSCURO); // Simula LED apagado
-    textoCentrado("LED Apagado", 140);
-  }
-  */
-
-  // Comando 2 
-  //Apagar LED (Dibujo de LED apagado)
+  // segundo comando - Apagar LED
   else if (texto.indexOf("apaga") >= 0 && texto.indexOf("led") >= 0) {
-
+    // Dibujo del LED apagado
     mostrarLedVirtual(false);
 
     delay(3000);
   }
-  // Comando 3: 
-  //Saludo
+  // tercer comando - saludo
   else if (texto.indexOf("saluda") >= 0 || texto.indexOf("hola") >= 0) {
     // dibujarCaraNormal();
     tft.setTextColor(TFT_PINK, FONDO);
     imprimirTextoPantalla("¡Hola! Soy Viernes", false);
 
-    esperarToqueParaContinuar();
+    delay(3000);
   }
   
-  // Comando 4:
-  // Hora (Mérida, Yucatán)
+  // cuarto comando - Hora (Mérida, Yucatán)
   else if ((texto.indexOf("tiempo") >= 0) || (texto.indexOf("hora") >= 0)) {
     HTTPClient http;
-    http.begin("http://worldtimeapi.org/api/timezone/America/Merida");
+    
+    http.begin(DEFAULT_SERVER_URL "/time.php");
     int httpCode = http.GET();
+    
     if (httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();
-
-      int startIndex = payload.indexOf("T") + 1;
-      String horaActual = payload.substring(startIndex, startIndex + 5);
+      String horaActual = http.getString(); // Devuelve directamente la hora, ej: "11:09"
       
-      // tft.setTextSize(4);
-      // tft.setTextColor(TFT_CYAN, FONDO);
-      // textoCentrado(horaActual, 70);
-      imprimirTextoPantalla(horaActual, true);
+      Serial.println(horaActual);
+      imprimirTextoPantalla(horaActual, false);
+    } else {
+      Serial.print("Error HTTP: ");
+      Serial.println(httpCode);
     }
     http.end();
 
-    esperarToqueParaContinuar();
+    delay(3000);
   }
   
-  // Comando 5: 
-  //Clima
+  // quinto comando - Clima
   else if ((texto.indexOf("clima") >= 0) || (texto.indexOf("Clima") >= 0)) {
     HTTPClient http;
     http.begin("https://api.open-meteo.com/v1/forecast?latitude=20.9753&longitude=-89.6169&current_weather=true");
@@ -79,8 +63,13 @@ void ejecutarComandosViernes(String texto) {
     if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();
 
-      int tempIndex = payload.indexOf("\"temperature\":") + 14;
+      // Buscamos primero el bloque exacto del clima actual para evitar confundirlo con las unidades
+      int currentWeatherPos = payload.indexOf("\"current_weather\":{");
+      
+      // A partir de ese bloque, buscamos la temperatura real
+      int tempIndex = payload.indexOf("\"temperature\":", currentWeatherPos) + 14;
       int commaIndex = payload.indexOf(",", tempIndex);
+      
       String temperatura = payload.substring(tempIndex, commaIndex) + " C";
       
       tft.setTextSize(3);
@@ -88,16 +77,18 @@ void ejecutarComandosViernes(String texto) {
       textoCentrado("Clima en Merida:", 50);
       tft.setTextSize(4);
       textoCentrado(temperatura, 90);
+      Serial.print("Temperatura: ");
+      Serial.println(temperatura);
     }
     http.end();
 
-    esperarToqueParaContinuar();
+    delay(3000);
   }
   
   // Si no reconoce el comando
   else {
     imprimirTextoPantalla("Comando no reconocido", false);
-    delay(4000);
+    delay(3000);
   }
 }
 
@@ -133,14 +124,13 @@ void loop() {
         return;
     }
 
-    // Cambia "Wake" por el nombre exacto de la etiqueta que le pusiste en Edge Impulse
     if (escucharWakeWord("Wake", 0.75)) {
         Serial.println("Escuchando y Grabando 5 segundos....");
 
         // Recibimos el struct con toda la información desacoplada
-        RespuestaTranscripcion respuesta = grabarYEnviar(mostrarBarraProgresoGrabacion, DEFAULT_SERVER_URL);
+        RespuestaTranscripcion respuesta = grabarYEnviar(mostrarBarraProgresoGrabacion, DEFAULT_SERVER_URL "/upload.php");
 
-        // Guardamos en tus Strings
+        // Guardamos la respuesta en los strings globales
         ultimoStatus = respuesta.status;
         ultimoTexto  = respuesta.text;
         ultimoError  = respuesta.error;

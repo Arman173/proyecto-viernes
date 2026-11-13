@@ -3,9 +3,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 
-// =================================================
 // PINES LILYGO T-DISPLAY-S3 TOUCH
-// =================================================
 #define LCD_PWR    15  // Encendido de pantalla
 #define LCD_BL     38  // Luz de fondo (Backlight)
 
@@ -20,9 +18,7 @@ TFT_eSPI tft = TFT_eSPI();
 
 Preferences preferencias;
 
-// =================================================
 // COLORES
-// =================================================
 #define FONDO       TFT_BLACK
 #define BLANCO      TFT_WHITE
 #define VERDE       TFT_GREEN
@@ -45,20 +41,18 @@ Preferences preferencias;
 #define COLOR_LED_APAGADO     GRIS_OSCURO
 #define COLOR_BARRA_PROGRESO  ROSA_PASTEL
 
-// =================================================
 // CREDENCIALES PREDEFINIDAS
-// =================================================
 struct CredencialConocida {
   const char* ssid;
   const char* password; // "" si no tiene contraseña
 };
 
-CredencialConocida redesConocidas[] = {};
+CredencialConocida redesConocidas[] = {
+  {"INFINITUM0E3C", "kPEyE7hSKQ"}
+};
 const int NUM_CONOCIDAS = sizeof(redesConocidas) / sizeof(redesConocidas[0]);
 
-// =================================================
 // VARIABLES DE ESTADO
-// =================================================
 enum EstadoRobot {
   MODO_CARA,          // Viendo la cara normal
   MODO_LISTA_WIFI,    // Viendo Red 1, Red 2, Red 3...
@@ -112,9 +106,7 @@ const char* mapaSimbolos[40] = {
 
 int capaTeclado = 0; // 0 = minúsculas, 1 = MAYÚSCULAS, 2 = símbolos
 
-// =================================================
 // DRIVER TÁCTIL INTEGRADO (CST816S para LilyGO S3)
-// =================================================
 
 void iniciarTouch() {
   pinMode(TOUCH_RST, OUTPUT);
@@ -162,9 +154,7 @@ bool leerToquePantalla(int &x, int &y) {
   return true;
 }
 
-// =================================================
 // DIBUJOS DE LA CARA E INTERFAZ
-// =================================================
 
 void dibujarIconoWiFi(uint16_t color) {
   int cx = WIFI_X;
@@ -205,9 +195,7 @@ void textoCentrado(const String &texto, int y) {
   tft.setTextDatum(TL_DATUM);
 }
 
-// =================================================
 // FUNCIONES DE EXPERIENCIA DE USUARIO (UX)
-// =================================================
 
 /**
  * FUNCIÓN 4: Espera el toque del usuario mostrando un aviso sutil en la parte inferior.
@@ -426,9 +414,7 @@ void mostrarBarraProgresoGrabacion(int porcentaje, float segundosTranscurridos, 
   tft.setTextDatum(TL_DATUM);
 }
 
-// =================================================
 // LISTA DE REDES TÁCTIL (Red 1, Red 2, Red 3...)
-// =================================================
 
 bool buscarCredencialGuardada(const String &ssid, String &passOut) {
   for (int i = 0; i < NUM_CONOCIDAS; i++) {
@@ -533,9 +519,7 @@ void escanearYMostrarRedes() {
   mostrarListaRedes();
 }
 
-// =================================================
 // CONEXIÓN WI-FI
-// =================================================
 
 void iniciarConexion(const String &ssid, const String &pass) {
   estadoActual = MODO_CONECTANDO;
@@ -557,9 +541,7 @@ void iniciarConexion(const String &ssid, const String &pass) {
   tiempoInicioConexion = millis();
 }
 
-// =================================================
 // TECLADO TÁCTIL EN PANTALLA
-// =================================================
 
 const char* obtenerTeclaActual(int index) {
   if (capaTeclado == 0) return mapaMinusculas[index];
@@ -641,9 +623,7 @@ void dibujarTeclado() {
   tft.setTextDatum(TL_DATUM);
 }
 
-// =================================================
 // PROCESAMIENTO DE TOQUES EN PANTALLA
-// =================================================
 
 void procesarToque(int x, int y) {
   // 1. MODO CARA -> Tocar el icono Wi-Fi arriba a la derecha
@@ -752,7 +732,6 @@ void procesarToque(int x, int y) {
   }
 }
 
-// También puedes seguir pegando la contraseña por el Monitor Serial si lo deseas
 void revisarSerialWiFi() {
   if (estadoActual == MODO_TECLADO && Serial.available() > 0) {
     String passSerial = Serial.readStringUntil('\n');
@@ -791,9 +770,7 @@ void gestionarConexion() {
   }
 }
 
-// =================================================
 // SETUP Y LOOP
-// =================================================
 
 void configurarPantallaYRed() {
 
